@@ -22,10 +22,12 @@ from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
 from graphiti_core.embedder.azure_openai import AzureOpenAIEmbedderClient
 from graphiti_core.embedder.client import EmbedderClient
+from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
 from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
 from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.llm_client.gemini_client import GeminiClient
 from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_config_recipes import (
@@ -200,6 +202,7 @@ class GraphitiLLMConfig(BaseModel):
     azure_openai_deployment_name: str | None = None
     azure_openai_api_version: str | None = None
     azure_openai_use_managed_identity: bool = False
+    openai_base_url: str | None = None
 
     @classmethod
     def from_env(cls) -> 'GraphitiLLMConfig':
@@ -218,6 +221,7 @@ class GraphitiLLMConfig(BaseModel):
         azure_openai_use_managed_identity = (
             os.environ.get('AZURE_OPENAI_USE_MANAGED_IDENTITY', 'false').lower() == 'true'
         )
+        openai_base_url = os.environ.get('OPENAI_BASE_URL', None)
 
         if azure_openai_endpoint is None:
             # Setup for OpenAI API
@@ -236,6 +240,7 @@ class GraphitiLLMConfig(BaseModel):
                 model=model,
                 small_model=small_model,
                 temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
+                openai_base_url=openai_base_url,
             )
         else:
             # Setup for Azure OpenAI API
@@ -260,6 +265,7 @@ class GraphitiLLMConfig(BaseModel):
                 model=model,
                 small_model=small_model,
                 temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
+                openai_base_url=openai_base_url,
             )
 
     @classmethod
@@ -287,6 +293,12 @@ class GraphitiLLMConfig(BaseModel):
             config.temperature = args.temperature
 
         return config
+
+    def _is_gemini_endpoint(self) -> bool:
+        """Check if the base URL indicates a Gemini endpoint."""
+        if not self.openai_base_url:
+            return False
+        return 'generativelanguage.googleapis.com' in self.openai_base_url or 'vertex' in self.openai_base_url.lower()
 
     def create_client(self) -> LLMClient:
         """Create an LLM client based on this configuration.
@@ -333,6 +345,15 @@ class GraphitiLLMConfig(BaseModel):
             else:
                 raise ValueError('OPENAI_API_KEY must be set when using Azure OpenAI API')
 
+        # Check if this is a Gemini endpoint via OPENAI_BASE_URL
+        if self._is_gemini_endpoint():
+            if not self.api_key:
+                raise ValueError('OPENAI_API_KEY must be set when using Gemini API')
+            
+            llm_client_config = LLMConfig(api_key=self.api_key, model=self.model, small_model=self.small_model
+                                          )
+            return GeminiClient(config=llm_client_config)
+
         if not self.api_key:
             raise ValueError('OPENAI_API_KEY must be set when using OpenAI API')
 
@@ -358,6 +379,7 @@ class GraphitiEmbedderConfig(BaseModel):
     azure_openai_deployment_name: str | None = None
     azure_openai_api_version: str | None = None
     azure_openai_use_managed_identity: bool = False
+    openai_base_url: str | None = None
 
     @classmethod
     def from_env(cls) -> 'GraphitiEmbedderConfig':
@@ -375,6 +397,7 @@ class GraphitiEmbedderConfig(BaseModel):
         azure_openai_use_managed_identity = (
             os.environ.get('AZURE_OPENAI_USE_MANAGED_IDENTITY', 'false').lower() == 'true'
         )
+        openai_base_url = os.environ.get('OPENAI_BASE_URL', None)
         if azure_openai_endpoint is not None:
             # Setup for Azure OpenAI API
             # Log if empty deployment name was provided
@@ -403,12 +426,20 @@ class GraphitiEmbedderConfig(BaseModel):
                 api_key=api_key,
                 azure_openai_api_version=azure_openai_api_version,
                 azure_openai_deployment_name=azure_openai_deployment_name,
+                openai_base_url=openai_base_url,
             )
         else:
             return cls(
                 model=model,
                 api_key=os.environ.get('OPENAI_API_KEY'),
+                openai_base_url=openai_base_url,
             )
+
+    def _is_gemini_endpoint(self) -> bool:
+        """Check if the base URL indicates a Gemini endpoint."""
+        if not self.openai_base_url:
+            return False
+        return 'generativelanguage.googleapis.com' in self.openai_base_url or 'vertex' in self.openai_base_url.lower()
 
     def create_client(self) -> EmbedderClient | None:
         if self.azure_openai_endpoint is not None:
@@ -439,14 +470,25 @@ class GraphitiEmbedderConfig(BaseModel):
             else:
                 logger.error('OPENAI_API_KEY must be set when using Azure OpenAI API')
                 return None
-        else:
-            # OpenAI API setup
+        
+        # Check if this is a Gemini endpoint via OPENAI_BASE_URL
+        if self._is_gemini_endpoint():
             if not self.api_key:
                 return None
+            
+            gemini_config = GeminiEmbedderConfig(
+                api_key=self.api_key,
+                model=self.model
+            )
+            return GeminiEmbedder(config=gemini_config)
+        
+        # OpenAI API setup
+        if not self.api_key:
+            return None
 
-            embedder_config = OpenAIEmbedderConfig(api_key=self.api_key, embedding_model=self.model)
+        embedder_config = OpenAIEmbedderConfig(api_key=self.api_key, embedding_model=self.model)
 
-            return OpenAIEmbedder(config=embedder_config)
+        return OpenAIEmbedder(config=embedder_config)
 
 
 class Neo4jConfig(BaseModel):
